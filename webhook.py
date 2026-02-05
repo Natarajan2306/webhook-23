@@ -358,6 +358,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     'WEBHOOK_MODE': 'custom',
                     'WEBHOOK_TO': data.get('to', ''),
                     'WEBHOOK_SUBJECT': data.get('subject', ''),
+                    'WEBHOOK_MESSAGE': data.get('message', ''),
                     'WEBHOOK_TIMESTAMP': datetime.now().isoformat(),
                 }
             

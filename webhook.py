@@ -10,6 +10,7 @@ import urllib.parse
 import base64
 import hmac
 import hashlib
+import tempfile
 
 # Config from environment
 SECRET_TOKEN = os.environ.get('WEBHOOK_SECRET')
@@ -20,6 +21,9 @@ ALLOWED_IPS = os.environ.get('ALLOWED_IPS', '').split(',')  # comma-separated, e
 RATE_LIMIT = int(os.environ.get('RATE_LIMIT', 10))  # requests per minute
 MAX_PAYLOAD_SIZE = int(os.environ.get('MAX_PAYLOAD_SIZE', 1_000_000))  # 1MB default
 PORT = int(os.environ.get('PORT', 5001))
+
+# Webhook data file path (for passing parsed data to scripts)
+WEBHOOK_DATA_FILE = os.environ.get('WEBHOOK_DATA_FILE', os.path.join(tempfile.gettempdir(), 'webhook_data.json'))
 
 # Jenkins config from environment
 JENKINS_URL = os.environ.get('JENKINS_URL', '').rstrip('/')
@@ -142,6 +146,50 @@ def reconstruct_email_format_message(parsed_data):
         lines.append(f"CDPID: {parsed_data['cdpid']}")
     
     return '\n'.join(lines)
+
+def save_webhook_data_to_file(parsed_data, email_text=None, webhook_subject=None, webhook_to=None):
+    """
+    Save parsed webhook data to a JSON file for scripts to read.
+    
+    Args:
+        parsed_data: dict with parsed fields
+        email_text: Original email-format text (if available)
+        webhook_subject: Webhook subject
+        webhook_to: Webhook recipient
+    """
+    try:
+        # Reconstruct message if not provided
+        if email_text:
+            webhook_message = email_text
+        else:
+            webhook_message = reconstruct_email_format_message(parsed_data)
+        
+        # Prepare data structure for code.py
+        webhook_data = {
+            'WEBHOOK_MESSAGE': webhook_message,
+            'WEBHOOK_SUBJECT': webhook_subject or 'Webhook',
+            'WEBHOOK_TO': webhook_to or parsed_data.get('email', ''),
+            'FIRST_NAME': parsed_data.get('first_name', ''),
+            'LAST_NAME': parsed_data.get('last_name', ''),
+            'EMAIL': parsed_data.get('email', ''),
+            'COURSE': parsed_data.get('course', ''),
+            'COUNTRY': parsed_data.get('country', ''),
+            'DATE': parsed_data.get('date', ''),
+            'SOURCE': parsed_data.get('source', ''),
+            'PHONE': parsed_data.get('phone', ''),
+            'CDPID': parsed_data.get('cdpid', ''),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Write to file
+        with open(WEBHOOK_DATA_FILE, 'w') as f:
+            json.dump(webhook_data, f, indent=2)
+        
+        print(f"💾 Saved parsed webhook data to: {WEBHOOK_DATA_FILE}")
+        return True
+    except Exception as e:
+        print(f"⚠️  Failed to save webhook data to file: {e}")
+        return False
 
 def extract_data_from_woocommerce_payload(data):
     """
@@ -535,28 +583,72 @@ class WebhookHandler(BaseHTTPRequestHandler):
         
         print(f"{'='*50}\n")
         
+        # Parse webhook data (for both Jenkins and file saving)
+        parsed_data = None
+        email_text = None
+        message_text = None
+        
+        if WEBHOOK_MODE == 'woocommerce':
+            # Extract email-format data from WooCommerce payload
+            email_text = extract_data_from_woocommerce_payload(data)
+            
+            if email_text:
+                print("📧 Found email-format data in webhook payload")
+                parsed_data = parse_email_format_data(email_text)
+                print(f"   Parsed fields: {list(parsed_data.keys())}")
+            else:
+                print("⚠️  No email-format data found in webhook payload")
+                # Try to extract from message field if it exists
+                if 'message' in data:
+                    email_text = str(data['message'])
+                    parsed_data = parse_email_format_data(email_text)
+        else:
+            # Custom webhook - try to parse email format from message field
+            message_text = data.get('message', '')
+            email_text = message_text
+            parsed_data = parse_email_format_data(message_text)
+        
+        # Save parsed data to file for scripts to read (always, even without Jenkins)
+        if parsed_data and any(parsed_data.values()):
+            print(f"✅ Parsed data ready:")
+            print(f"   First Name: {parsed_data.get('first_name')}")
+            print(f"   Last Name: {parsed_data.get('last_name')}")
+            print(f"   Email: {parsed_data.get('email')}")
+            print(f"   Course: {parsed_data.get('course')}")
+            
+            # Save to file
+            if WEBHOOK_MODE == 'woocommerce':
+                save_webhook_data_to_file(
+                    parsed_data,
+                    email_text=email_text,
+                    webhook_subject=self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook'),
+                    webhook_to=parsed_data.get('email', '')
+                )
+            else:
+                save_webhook_data_to_file(
+                    parsed_data,
+                    email_text=message_text,
+                    webhook_subject=data.get('subject', ''),
+                    webhook_to=data.get('to', '')
+                )
+        elif email_text:
+            # If we have email_text but parsing failed, still save it
+            partial_parsed = parse_email_format_data(email_text)
+            if partial_parsed:
+                save_webhook_data_to_file(
+                    partial_parsed,
+                    email_text=email_text,
+                    webhook_subject=data.get('subject', '') if WEBHOOK_MODE == 'custom' else self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook'),
+                    webhook_to=partial_parsed.get('email', '') or data.get('to', '')
+                )
+        
         # Trigger Jenkins job if configured
         jenkins_status = None
         if JENKINS_URL and JENKINS_USER and JENKINS_API_TOKEN and JENKINS_JOB_NAME:
-            print(f"Triggering Jenkins job: {JENKINS_JOB_NAME}")
+            print(f"\nTriggering Jenkins job: {JENKINS_JOB_NAME}")
             
             # Prepare parameters to pass to Jenkins job
             if WEBHOOK_MODE == 'woocommerce':
-                # Extract email-format data from WooCommerce payload
-                email_text = extract_data_from_woocommerce_payload(data)
-                parsed_data = None
-                
-                if email_text:
-                    print("📧 Found email-format data in webhook payload")
-                    parsed_data = parse_email_format_data(email_text)
-                    print(f"   Parsed fields: {list(parsed_data.keys())}")
-                else:
-                    print("⚠️  No email-format data found in webhook payload")
-                    # Try to extract from message field if it exists
-                    if 'message' in data:
-                        parsed_data = parse_email_format_data(str(data['message']))
-                
-                # WooCommerce webhook parameters
                 jenkins_params = {
                     'WEBHOOK_MODE': 'woocommerce',
                     'WEBHOOK_EVENT': self.headers.get('X-WC-Webhook-Event', 'unknown'),
@@ -565,23 +657,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     'WEBHOOK_TIMESTAMP': datetime.now().isoformat(),
                 }
                 
-                # Add parsed email data if available
                 if parsed_data:
-                    # Use original email_text if available, otherwise reconstruct from parsed data
                     if email_text:
                         jenkins_params['WEBHOOK_MESSAGE'] = email_text
-                        print(f"   📧 Using original email-format text as WEBHOOK_MESSAGE")
                     else:
-                        # Reconstruct email-format message for code.py compatibility
-                        reconstructed_message = reconstruct_email_format_message(parsed_data)
-                        jenkins_params['WEBHOOK_MESSAGE'] = reconstructed_message
-                        if reconstructed_message:
-                            print(f"   📧 WEBHOOK_MESSAGE reconstructed for code.py compatibility")
+                        jenkins_params['WEBHOOK_MESSAGE'] = reconstruct_email_format_message(parsed_data)
                     
-                    # Also set WEBHOOK_SUBJECT and WEBHOOK_TO if available (for code.py compatibility)
                     jenkins_params['WEBHOOK_SUBJECT'] = self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook')
-                    jenkins_params['WEBHOOK_TO'] = parsed_data.get('email', '')  # Use email as TO
-                    
+                    jenkins_params['WEBHOOK_TO'] = parsed_data.get('email', '')
                     jenkins_params.update({
                         'FIRST_NAME': parsed_data.get('first_name', ''),
                         'LAST_NAME': parsed_data.get('last_name', ''),
@@ -593,22 +676,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         'PHONE': parsed_data.get('phone', ''),
                         'CDPID': parsed_data.get('cdpid', ''),
                     })
-                    print(f"✅ Parsed data ready for Jenkins:")
-                    print(f"   First Name: {parsed_data.get('first_name')}")
-                    print(f"   Last Name: {parsed_data.get('last_name')}")
-                    print(f"   Email: {parsed_data.get('email')}")
-                    print(f"   Course: {parsed_data.get('course')}")
-                elif email_text:
-                    # If we have email_text but parsing failed, still send it
-                    jenkins_params['WEBHOOK_MESSAGE'] = email_text
-                    jenkins_params['WEBHOOK_SUBJECT'] = self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook')
-                    print(f"   📧 Sending raw email-format text as WEBHOOK_MESSAGE (parsing may have failed)")
             else:
-                # Custom webhook - try to parse email format from message field
-                message_text = data.get('message', '')
-                parsed_data = parse_email_format_data(message_text)
-                
-                # Custom webhook parameters
                 jenkins_params = {
                     'WEBHOOK_MODE': 'custom',
                     'WEBHOOK_TO': data.get('to', ''),
@@ -617,7 +685,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     'WEBHOOK_TIMESTAMP': datetime.now().isoformat(),
                 }
                 
-                # Add parsed email data if available
                 if parsed_data and any(parsed_data.values()):
                     jenkins_params.update({
                         'FIRST_NAME': parsed_data.get('first_name', ''),
@@ -630,11 +697,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         'PHONE': parsed_data.get('phone', ''),
                         'CDPID': parsed_data.get('cdpid', ''),
                     })
-                    print(f"✅ Parsed data ready for Jenkins:")
-                    print(f"   First Name: {parsed_data.get('first_name')}")
-                    print(f"   Last Name: {parsed_data.get('last_name')}")
-                    print(f"   Email: {parsed_data.get('email')}")
-                    print(f"   Course: {parsed_data.get('course')}")
             
             success, message, build_number = trigger_jenkins_job(
                 JENKINS_JOB_NAME,

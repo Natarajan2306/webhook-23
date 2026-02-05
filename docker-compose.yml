@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  webhook:
+    build: .
+    container_name: webhook-server
+    ports:
+      - "5001:5001"
+    environment:
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-change-me-secret-token}
+      - PORT=5001
+      - ALLOWED_IPS=${ALLOWED_IPS:-}
+      - RATE_LIMIT=${RATE_LIMIT:-10}
+      - MAX_PAYLOAD_SIZE=${MAX_PAYLOAD_SIZE:-1000000}
+    restart: unless-stopped
+

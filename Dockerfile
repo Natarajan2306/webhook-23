@@ -7,7 +7,7 @@ WORKDIR /app
 COPY webhook.py .
 
 # Expose the default port
-EXPOSE 5001
+EXPOSE 8080
 
 # Run the webhook server
 CMD ["python", "webhook.py"]

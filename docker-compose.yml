@@ -1,8 +1,8 @@
 services:
   webhook:
     build: .
-    ports:
-      - "5001:5001"
+    expose:
+      - "8080"
     env_file:
       - .env
     environment:
@@ -13,7 +13,7 @@ services:
       - ALLOWED_IPS=${ALLOWED_IPS:-}
       - RATE_LIMIT=${RATE_LIMIT:-10}
       - MAX_PAYLOAD_SIZE=${MAX_PAYLOAD_SIZE:-1000000}
-      - PORT=${PORT:-5001}
+      - PORT=${PORT:-8080}
       - JENKINS_URL=${JENKINS_URL:-}
       - JENKINS_USER=${JENKINS_USER:-}
       - JENKINS_API_TOKEN=${JENKINS_API_TOKEN:-}

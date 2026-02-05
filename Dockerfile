@@ -1,11 +1,12 @@
 FROM python:3.11-slim
 
+# Set working directory
 WORKDIR /app
 
-# Copy the webhook application
+# Copy the webhook script
 COPY webhook.py .
 
-# Expose the port
+# Expose the default port
 EXPOSE 5001
 
 # Run the webhook server

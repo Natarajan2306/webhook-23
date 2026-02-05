@@ -1,40 +1,37 @@
-version: '3.8'
-
 services:
   webhook:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: webhook-server
+    build: .
     ports:
-      - "${PORT:-5001}:5001"
+      - "5001:5001"
+    env_file:
+      - .env
     environment:
-      # Webhook configuration
+      - PYTHONUNBUFFERED=1
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
-      - WOOCOMMERCE_WEBHOOK_SECRET=${WOOCOMMERCE_WEBHOOK_SECRET:-}
       - WEBHOOK_MODE=${WEBHOOK_MODE:-custom}
-      - NGROK_URL=${NGROK_URL:-}
+      - WOOCOMMERCE_WEBHOOK_SECRET=${WOOCOMMERCE_WEBHOOK_SECRET:-}
       - ALLOWED_IPS=${ALLOWED_IPS:-}
       - RATE_LIMIT=${RATE_LIMIT:-10}
       - MAX_PAYLOAD_SIZE=${MAX_PAYLOAD_SIZE:-1000000}
-      - PORT=5001
-      
-      # Jenkins configuration
+      - PORT=${PORT:-5001}
       - JENKINS_URL=${JENKINS_URL:-}
       - JENKINS_USER=${JENKINS_USER:-}
       - JENKINS_API_TOKEN=${JENKINS_API_TOKEN:-}
       - JENKINS_JOB_NAME=${JENKINS_JOB_NAME:-}
-    networks:
-      - webhook-network
+      - NGROK_URL=${NGROK_URL:-}  # Optional: Manually set ngrok URL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Allows access to host machine from Docker
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
 
-networks:
-  webhook-network:
-    driver: bridge
+  # Optional: ngrok for public URL (for testing)
+  # Uncomment and configure if you need a public URL for WooCommerce webhooks
+  # ngrok:
+  #   image: ngrok/ngrok:latest
+  #   command: http webhook:5001
+  #   environment:
+  #     - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-}
+  #   ports:
+  #     - "4040:4040"  # ngrok web interface
+  #   depends_on:
+  #     - webhook
 

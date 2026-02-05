@@ -15,6 +15,7 @@ import hashlib
 SECRET_TOKEN = os.environ.get('WEBHOOK_SECRET')
 WOOCOMMERCE_SECRET = os.environ.get('WOOCOMMERCE_WEBHOOK_SECRET', '')  # WooCommerce webhook secret
 WEBHOOK_MODE = os.environ.get('WEBHOOK_MODE', 'custom').lower()  # 'custom' or 'woocommerce'
+NGROK_URL = os.environ.get('NGROK_URL', '')  # Manually set ngrok URL (fallback)
 ALLOWED_IPS = os.environ.get('ALLOWED_IPS', '').split(',')  # comma-separated, empty = allow all
 RATE_LIMIT = int(os.environ.get('RATE_LIMIT', 10))  # requests per minute
 MAX_PAYLOAD_SIZE = int(os.environ.get('MAX_PAYLOAD_SIZE', 1_000_000))  # 1MB default
@@ -34,6 +35,54 @@ elif not SECRET_TOKEN:
     raise ValueError("WEBHOOK_SECRET environment variable is required when WEBHOOK_MODE=custom")
 
 rate_tracker = defaultdict(list)
+
+def get_ngrok_url():
+    """
+    Fetch ngrok public URL from ngrok API or environment variable.
+    Returns the HTTPS URL if available, otherwise HTTP URL.
+    Tries multiple endpoints to work both on host and in Docker.
+    """
+    # First, check if manually set via environment variable
+    if NGROK_URL:
+        return NGROK_URL
+    
+    # Try multiple endpoints:
+    # 1. host.docker.internal (works on Docker Desktop for Mac/Windows/Linux)
+    # 2. 172.17.0.1 (default Docker bridge gateway on Linux)
+    # 3. localhost (works if running directly on host, not in Docker)
+    endpoints = [
+        'http://host.docker.internal:4040/api/tunnels',  # Docker Desktop (Mac/Windows/Linux)
+        'http://172.17.0.1:4040/api/tunnels',              # Docker bridge gateway (Linux)
+        'http://localhost:4040/api/tunnels',                # Direct host access
+    ]
+    
+    for endpoint in endpoints:
+        try:
+            req = urllib.request.Request(endpoint)
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode())
+                tunnels = data.get('tunnels', [])
+                # Prefer HTTPS tunnel
+                for tunnel in tunnels:
+                    if tunnel.get('proto') == 'https':
+                        return tunnel.get('public_url', '')
+                # Fallback to HTTP if HTTPS not available
+                for tunnel in tunnels:
+                    if tunnel.get('proto') == 'http':
+                        return tunnel.get('public_url', '')
+        except urllib.error.HTTPError as e:
+            # 401/403 might mean ngrok is accessible but requires auth - try next endpoint
+            if e.code in [401, 403]:
+                continue
+            # Other HTTP errors - try next endpoint
+            continue
+        except (urllib.error.URLError, ConnectionRefusedError):
+            # Connection refused - try next endpoint
+            continue
+        except Exception:
+            # Any other error - try next endpoint
+            continue
+    return None
 
 def verify_woocommerce_signature(payload, signature, secret):
     """
@@ -368,6 +417,16 @@ if __name__ == '__main__':
     # Local URL
     print(f"🔵 Local URL: http://localhost:{PORT}")
     
+    # Try to get ngrok URL
+    ngrok_url = get_ngrok_url()
+    if ngrok_url:
+        print(f"🟢 Testing URL (ngrok): {ngrok_url}")
+        print(f"   ✅ Use this URL for WooCommerce webhook testing")
+    else:
+        print(f"🟡 Testing URL (ngrok): Not available")
+        print(f"   💡 To enable: Run 'ngrok http {PORT}' in another terminal")
+        print(f"   💡 Or uncomment ngrok service in docker-compose.yml")
+    
     # Production URL
     print(f"🔴 Production URL: https://<your-domain.com>:{PORT}")
     print(f"   💡 Deploy to a server with public domain for production")
@@ -375,7 +434,14 @@ if __name__ == '__main__':
     
     if WEBHOOK_MODE == 'woocommerce':
         print(f"\n⚠️  WOOCOMMERCE REQUIRES PUBLIC URL!")
-        print(f"   💡 Deploy to a server with public domain for WooCommerce webhooks")
+        if ngrok_url:
+            print(f"   ✅ Use ngrok URL for testing: {ngrok_url}")
+        else:
+            print(f"   ❌ No public URL available - WooCommerce cannot reach localhost")
+            print(f"   📝 Steps:")
+            print(f"      1. Run: ngrok http {PORT}")
+            print(f"      2. Copy the ngrok URL")
+            print(f"      3. Use it in WooCommerce webhook settings")
     
     print(f"{'='*60}\n")
     

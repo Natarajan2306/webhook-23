@@ -36,6 +36,134 @@ elif not SECRET_TOKEN:
 
 rate_tracker = defaultdict(list)
 
+def parse_email_format_data(text):
+    """
+    Parse email-format data from webhook payload.
+    
+    Expected format:
+    First Name: Natarajan
+    Last Name: Natty
+    Email: natty@pdevsecops.com
+    Course: Cloud Native Security Expert (CCNSE) - $999
+    Country: Canada
+    Date: 06-Feb-2026
+    Source: Social Media
+    Phone: 093602 68718
+    CDPID:
+    
+    Args:
+        text: String containing the email-format data
+        
+    Returns:
+        dict: Parsed data with keys: first_name, last_name, email, course, country, date, source, phone, cdpid
+    """
+    parsed_data = {
+        'first_name': '',
+        'last_name': '',
+        'email': '',
+        'course': '',
+        'country': '',
+        'date': '',
+        'source': '',
+        'phone': '',
+        'cdpid': ''
+    }
+    
+    if not text:
+        return parsed_data
+    
+    # Split by lines and parse each line
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Split by colon to get field name and value
+        if ':' in line:
+            parts = line.split(':', 1)
+            field_name = parts[0].strip().lower()
+            field_value = parts[1].strip() if len(parts) > 1 else ''
+            
+            # Map field names to our parsed_data keys
+            if 'first name' in field_name:
+                parsed_data['first_name'] = field_value
+            elif 'last name' in field_name:
+                parsed_data['last_name'] = field_value
+            elif 'email' in field_name:
+                parsed_data['email'] = field_value
+            elif 'course' in field_name:
+                parsed_data['course'] = field_value
+            elif 'country' in field_name:
+                parsed_data['country'] = field_value
+            elif 'date' in field_name:
+                parsed_data['date'] = field_value
+            elif 'source' in field_name:
+                parsed_data['source'] = field_value
+            elif 'phone' in field_name:
+                parsed_data['phone'] = field_value
+            elif 'cdpid' in field_name:
+                parsed_data['cdpid'] = field_value
+    
+    return parsed_data
+
+def extract_data_from_woocommerce_payload(data):
+    """
+    Extract email-format data from WooCommerce webhook payload.
+    The data might be in various fields like description, customer_note, meta_data, etc.
+    
+    Args:
+        data: WooCommerce webhook payload (dict)
+        
+    Returns:
+        str: Extracted text data in email format, or None if not found
+    """
+    # Try different possible fields where the email data might be
+    possible_fields = [
+        'description',
+        'customer_note',
+        'note',
+        'message',
+        'content',
+        'meta_data',
+    ]
+    
+    # First, try direct field access
+    for field in possible_fields:
+        if field in data and data[field]:
+            if isinstance(data[field], str):
+                return data[field]
+            elif isinstance(data[field], list):
+                # If it's a list, try to find the email format data
+                for item in data[field]:
+                    if isinstance(item, dict) and 'value' in item:
+                        if isinstance(item['value'], str) and 'First Name:' in item['value']:
+                            return item['value']
+                    elif isinstance(item, str) and 'First Name:' in item:
+                        return item
+    
+    # Try meta_data field (common in WooCommerce)
+    if 'meta_data' in data and isinstance(data['meta_data'], list):
+        for meta_item in data['meta_data']:
+            if isinstance(meta_item, dict):
+                # Check if any meta value contains the email format
+                for key, value in meta_item.items():
+                    if isinstance(value, str) and 'First Name:' in value:
+                        return value
+    
+    # Try billing or shipping fields
+    for section in ['billing', 'shipping', 'line_items']:
+        if section in data and isinstance(data[section], dict):
+            for key, value in data[section].items():
+                if isinstance(value, str) and 'First Name:' in value:
+                    return value
+    
+    # If data is a string itself, return it
+    if isinstance(data, str) and 'First Name:' in data:
+        return data
+    
+    return None
+
 def get_ngrok_url():
     """
     Fetch ngrok public URL from ngrok API or environment variable.
@@ -305,12 +433,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self.send_error_response(400, 'Invalid WooCommerce webhook format')
                 return
             # WooCommerce webhooks can have various structures, so we're lenient
+            # Check if email-format data exists in the payload
+            email_text = extract_data_from_woocommerce_payload(data)
+            if email_text:
+                print("📧 Email-format data detected in WooCommerce webhook")
         else:
             # Custom webhook - validate required fields
-            required_fields = ['to', 'subject', 'message']
-            if not all(field in data for field in required_fields):
-                self.send_error_response(400, 'Missing required fields')
-                return
+            # For custom webhooks, we can accept either structured fields or email-format message
+            if isinstance(data, dict):
+                # Check if it has email-format data in message field
+                message = data.get('message', '')
+                if message and 'First Name:' in message:
+                    print("📧 Email-format data detected in custom webhook message")
+                elif not all(field in data for field in ['to', 'subject', 'message']):
+                    # Only require these fields if message doesn't contain email format
+                    if 'First Name:' not in str(message):
+                        self.send_error_response(400, 'Missing required fields (to, subject, message) or email-format data')
+                        return
         
         # Log the webhook
         print(f"\n{'='*50}")
@@ -329,10 +468,34 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 print(f"Order/Resource ID: {data.get('id')}")
             if 'status' in data:
                 print(f"Status: {data.get('status')}")
-            print(f"Payload keys: {list(data.keys())[:10]}...")  # Show first 10 keys
+            
+            # Try to extract and show parsed data preview
+            email_text = extract_data_from_woocommerce_payload(data)
+            if email_text:
+                parsed_preview = parse_email_format_data(email_text)
+                if parsed_preview.get('first_name') or parsed_preview.get('email'):
+                    print(f"📧 Parsed Data Preview:")
+                    if parsed_preview.get('first_name'):
+                        print(f"   Name: {parsed_preview.get('first_name')} {parsed_preview.get('last_name')}")
+                    if parsed_preview.get('email'):
+                        print(f"   Email: {parsed_preview.get('email')}")
+                    if parsed_preview.get('course'):
+                        print(f"   Course: {parsed_preview.get('course')}")
+            else:
+                print(f"Payload keys: {list(data.keys())[:10]}...")  # Show first 10 keys
         else:
-            # Log custom webhook details (email details removed for privacy)
-            pass
+            # Log custom webhook details
+            message = data.get('message', '')
+            if message and 'First Name:' in message:
+                parsed_preview = parse_email_format_data(message)
+                if parsed_preview.get('first_name') or parsed_preview.get('email'):
+                    print(f"📧 Parsed Data Preview:")
+                    if parsed_preview.get('first_name'):
+                        print(f"   Name: {parsed_preview.get('first_name')} {parsed_preview.get('last_name')}")
+                    if parsed_preview.get('email'):
+                        print(f"   Email: {parsed_preview.get('email')}")
+                    if parsed_preview.get('course'):
+                        print(f"   Course: {parsed_preview.get('course')}")
         
         print(f"{'='*50}\n")
         
@@ -341,9 +504,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if JENKINS_URL and JENKINS_USER and JENKINS_API_TOKEN and JENKINS_JOB_NAME:
             print(f"Triggering Jenkins job: {JENKINS_JOB_NAME}")
             
-            # Prepare parameters to pass to Jenkins job (optional)
-            # You can customize this to pass webhook data to Jenkins
+            # Prepare parameters to pass to Jenkins job
             if WEBHOOK_MODE == 'woocommerce':
+                # Extract email-format data from WooCommerce payload
+                email_text = extract_data_from_woocommerce_payload(data)
+                parsed_data = None
+                
+                if email_text:
+                    print("📧 Found email-format data in webhook payload")
+                    parsed_data = parse_email_format_data(email_text)
+                    print(f"   Parsed fields: {list(parsed_data.keys())}")
+                else:
+                    print("⚠️  No email-format data found in webhook payload")
+                    # Try to extract from message field if it exists
+                    if 'message' in data:
+                        parsed_data = parse_email_format_data(str(data['message']))
+                
                 # WooCommerce webhook parameters
                 jenkins_params = {
                     'WEBHOOK_MODE': 'woocommerce',
@@ -352,7 +528,30 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     'ORDER_STATUS': data.get('status', ''),
                     'WEBHOOK_TIMESTAMP': datetime.now().isoformat(),
                 }
+                
+                # Add parsed email data if available
+                if parsed_data:
+                    jenkins_params.update({
+                        'FIRST_NAME': parsed_data.get('first_name', ''),
+                        'LAST_NAME': parsed_data.get('last_name', ''),
+                        'EMAIL': parsed_data.get('email', ''),
+                        'COURSE': parsed_data.get('course', ''),
+                        'COUNTRY': parsed_data.get('country', ''),
+                        'DATE': parsed_data.get('date', ''),
+                        'SOURCE': parsed_data.get('source', ''),
+                        'PHONE': parsed_data.get('phone', ''),
+                        'CDPID': parsed_data.get('cdpid', ''),
+                    })
+                    print(f"✅ Parsed data ready for Jenkins:")
+                    print(f"   First Name: {parsed_data.get('first_name')}")
+                    print(f"   Last Name: {parsed_data.get('last_name')}")
+                    print(f"   Email: {parsed_data.get('email')}")
+                    print(f"   Course: {parsed_data.get('course')}")
             else:
+                # Custom webhook - try to parse email format from message field
+                message_text = data.get('message', '')
+                parsed_data = parse_email_format_data(message_text)
+                
                 # Custom webhook parameters
                 jenkins_params = {
                     'WEBHOOK_MODE': 'custom',
@@ -361,6 +560,25 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     'WEBHOOK_MESSAGE': data.get('message', ''),
                     'WEBHOOK_TIMESTAMP': datetime.now().isoformat(),
                 }
+                
+                # Add parsed email data if available
+                if parsed_data and any(parsed_data.values()):
+                    jenkins_params.update({
+                        'FIRST_NAME': parsed_data.get('first_name', ''),
+                        'LAST_NAME': parsed_data.get('last_name', ''),
+                        'EMAIL': parsed_data.get('email', ''),
+                        'COURSE': parsed_data.get('course', ''),
+                        'COUNTRY': parsed_data.get('country', ''),
+                        'DATE': parsed_data.get('date', ''),
+                        'SOURCE': parsed_data.get('source', ''),
+                        'PHONE': parsed_data.get('phone', ''),
+                        'CDPID': parsed_data.get('cdpid', ''),
+                    })
+                    print(f"✅ Parsed data ready for Jenkins:")
+                    print(f"   First Name: {parsed_data.get('first_name')}")
+                    print(f"   Last Name: {parsed_data.get('last_name')}")
+                    print(f"   Email: {parsed_data.get('email')}")
+                    print(f"   Course: {parsed_data.get('course')}")
             
             success, message, build_number = trigger_jenkins_job(
                 JENKINS_JOB_NAME,

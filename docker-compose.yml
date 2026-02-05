@@ -2,15 +2,39 @@ version: '3.8'
 
 services:
   webhook:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: webhook-server
     ports:
-      - "5001:5001"
+      - "${PORT:-5001}:5001"
     environment:
-      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-change-me-secret-token}
-      - PORT=5001
+      # Webhook configuration
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - WOOCOMMERCE_WEBHOOK_SECRET=${WOOCOMMERCE_WEBHOOK_SECRET:-}
+      - WEBHOOK_MODE=${WEBHOOK_MODE:-custom}
+      - NGROK_URL=${NGROK_URL:-}
       - ALLOWED_IPS=${ALLOWED_IPS:-}
       - RATE_LIMIT=${RATE_LIMIT:-10}
       - MAX_PAYLOAD_SIZE=${MAX_PAYLOAD_SIZE:-1000000}
+      - PORT=5001
+      
+      # Jenkins configuration
+      - JENKINS_URL=${JENKINS_URL:-}
+      - JENKINS_USER=${JENKINS_USER:-}
+      - JENKINS_API_TOKEN=${JENKINS_API_TOKEN:-}
+      - JENKINS_JOB_NAME=${JENKINS_JOB_NAME:-}
+    networks:
+      - webhook-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  webhook-network:
+    driver: bridge
 

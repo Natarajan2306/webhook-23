@@ -107,6 +107,42 @@ def parse_email_format_data(text):
     
     return parsed_data
 
+def reconstruct_email_format_message(parsed_data):
+    """
+    Reconstruct email-format message from parsed data.
+    
+    Args:
+        parsed_data: dict with keys: first_name, last_name, email, course, country, date, source, phone, cdpid
+        
+    Returns:
+        str: Reconstructed email-format message
+    """
+    if not parsed_data:
+        return ''
+    
+    lines = []
+    
+    if parsed_data.get('first_name'):
+        lines.append(f"First Name: {parsed_data['first_name']}")
+    if parsed_data.get('last_name'):
+        lines.append(f"Last Name: {parsed_data['last_name']}")
+    if parsed_data.get('email'):
+        lines.append(f"Email: {parsed_data['email']}")
+    if parsed_data.get('course'):
+        lines.append(f"Course: {parsed_data['course']}")
+    if parsed_data.get('country'):
+        lines.append(f"Country: {parsed_data['country']}")
+    if parsed_data.get('date'):
+        lines.append(f"Date: {parsed_data['date']}")
+    if parsed_data.get('source'):
+        lines.append(f"Source: {parsed_data['source']}")
+    if parsed_data.get('phone'):
+        lines.append(f"Phone: {parsed_data['phone']}")
+    if parsed_data.get('cdpid') is not None:  # Include even if empty
+        lines.append(f"CDPID: {parsed_data['cdpid']}")
+    
+    return '\n'.join(lines)
+
 def extract_data_from_woocommerce_payload(data):
     """
     Extract email-format data from WooCommerce webhook payload.
@@ -531,6 +567,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 
                 # Add parsed email data if available
                 if parsed_data:
+                    # Use original email_text if available, otherwise reconstruct from parsed data
+                    if email_text:
+                        jenkins_params['WEBHOOK_MESSAGE'] = email_text
+                        print(f"   📧 Using original email-format text as WEBHOOK_MESSAGE")
+                    else:
+                        # Reconstruct email-format message for code.py compatibility
+                        reconstructed_message = reconstruct_email_format_message(parsed_data)
+                        jenkins_params['WEBHOOK_MESSAGE'] = reconstructed_message
+                        if reconstructed_message:
+                            print(f"   📧 WEBHOOK_MESSAGE reconstructed for code.py compatibility")
+                    
+                    # Also set WEBHOOK_SUBJECT and WEBHOOK_TO if available (for code.py compatibility)
+                    jenkins_params['WEBHOOK_SUBJECT'] = self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook')
+                    jenkins_params['WEBHOOK_TO'] = parsed_data.get('email', '')  # Use email as TO
+                    
                     jenkins_params.update({
                         'FIRST_NAME': parsed_data.get('first_name', ''),
                         'LAST_NAME': parsed_data.get('last_name', ''),
@@ -547,6 +598,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     print(f"   Last Name: {parsed_data.get('last_name')}")
                     print(f"   Email: {parsed_data.get('email')}")
                     print(f"   Course: {parsed_data.get('course')}")
+                elif email_text:
+                    # If we have email_text but parsing failed, still send it
+                    jenkins_params['WEBHOOK_MESSAGE'] = email_text
+                    jenkins_params['WEBHOOK_SUBJECT'] = self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook')
+                    print(f"   📧 Sending raw email-format text as WEBHOOK_MESSAGE (parsing may have failed)")
             else:
                 # Custom webhook - try to parse email format from message field
                 message_text = data.get('message', '')

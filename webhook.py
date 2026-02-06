@@ -655,25 +655,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 webhook_subject = data.get('subject', 'Webhook')
                 webhook_to = data.get('to', '') or parsed_data.get('email', '')
             
-            # Output environment variables in shell-friendly format
-            print(f"\n{'='*60}")
-            print(f"📋 Environment Variables for Script:")
-            print(f"{'='*60}")
-            print(f"# Copy and run these commands to set environment variables:")
-            print(f"export WEBHOOK_MESSAGE={json.dumps(webhook_message)}")
-            print(f"export WEBHOOK_SUBJECT={json.dumps(webhook_subject)}")
-            print(f"export WEBHOOK_TO={json.dumps(webhook_to)}")
-            print(f"export FIRST_NAME={json.dumps(parsed_data.get('first_name', ''))}")
-            print(f"export LAST_NAME={json.dumps(parsed_data.get('last_name', ''))}")
-            print(f"export EMAIL={json.dumps(parsed_data.get('email', ''))}")
-            print(f"export COURSE={json.dumps(parsed_data.get('course', ''))}")
-            print(f"export COUNTRY={json.dumps(parsed_data.get('country', ''))}")
-            print(f"export DATE={json.dumps(parsed_data.get('date', ''))}")
-            print(f"export SOURCE={json.dumps(parsed_data.get('source', ''))}")
-            print(f"export PHONE={json.dumps(parsed_data.get('phone', ''))}")
-            print(f"export CDPID={json.dumps(parsed_data.get('cdpid', ''))}")
-            print(f"{'='*60}\n")
-        
         # Trigger Jenkins job if configured
         jenkins_status = None
         if JENKINS_URL and JENKINS_USER and JENKINS_API_TOKEN and JENKINS_JOB_NAME:

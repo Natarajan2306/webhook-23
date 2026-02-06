@@ -1,6 +1,7 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 import os
+import sys
 import time
 from datetime import datetime
 from collections import defaultdict
@@ -10,7 +11,8 @@ import urllib.parse
 import base64
 import hmac
 import hashlib
-import tempfile
+import subprocess
+import threading
 
 # Config from environment
 SECRET_TOKEN = os.environ.get('WEBHOOK_SECRET')
@@ -22,14 +24,15 @@ RATE_LIMIT = int(os.environ.get('RATE_LIMIT', 10))  # requests per minute
 MAX_PAYLOAD_SIZE = int(os.environ.get('MAX_PAYLOAD_SIZE', 1_000_000))  # 1MB default
 PORT = int(os.environ.get('PORT', 5001))
 
-# Webhook data file path (for passing parsed data to scripts)
-WEBHOOK_DATA_FILE = os.environ.get('WEBHOOK_DATA_FILE', os.path.join(tempfile.gettempdir(), 'webhook_data.json'))
-
 # Jenkins config from environment
 JENKINS_URL = os.environ.get('JENKINS_URL', '').rstrip('/')
 JENKINS_USER = os.environ.get('JENKINS_USER', '')
 JENKINS_API_TOKEN = os.environ.get('JENKINS_API_TOKEN', '')
 JENKINS_JOB_NAME = os.environ.get('JENKINS_JOB_NAME', '')
+
+# Code.py execution config (for direct execution without Jenkins)
+CODE_PY_PATH = os.environ.get('CODE_PY_PATH', 'code.py')  # Path to code.py script
+EXECUTE_CODE_PY = os.environ.get('EXECUTE_CODE_PY', 'false').lower() == 'true'  # Enable direct execution
 
 # Validate required configuration based on webhook mode
 if WEBHOOK_MODE == 'woocommerce':
@@ -146,50 +149,6 @@ def reconstruct_email_format_message(parsed_data):
         lines.append(f"CDPID: {parsed_data['cdpid']}")
     
     return '\n'.join(lines)
-
-def save_webhook_data_to_file(parsed_data, email_text=None, webhook_subject=None, webhook_to=None):
-    """
-    Save parsed webhook data to a JSON file for scripts to read.
-    
-    Args:
-        parsed_data: dict with parsed fields
-        email_text: Original email-format text (if available)
-        webhook_subject: Webhook subject
-        webhook_to: Webhook recipient
-    """
-    try:
-        # Reconstruct message if not provided
-        if email_text:
-            webhook_message = email_text
-        else:
-            webhook_message = reconstruct_email_format_message(parsed_data)
-        
-        # Prepare data structure for code.py
-        webhook_data = {
-            'WEBHOOK_MESSAGE': webhook_message,
-            'WEBHOOK_SUBJECT': webhook_subject or 'Webhook',
-            'WEBHOOK_TO': webhook_to or parsed_data.get('email', ''),
-            'FIRST_NAME': parsed_data.get('first_name', ''),
-            'LAST_NAME': parsed_data.get('last_name', ''),
-            'EMAIL': parsed_data.get('email', ''),
-            'COURSE': parsed_data.get('course', ''),
-            'COUNTRY': parsed_data.get('country', ''),
-            'DATE': parsed_data.get('date', ''),
-            'SOURCE': parsed_data.get('source', ''),
-            'PHONE': parsed_data.get('phone', ''),
-            'CDPID': parsed_data.get('cdpid', ''),
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        # Write to file
-        with open(WEBHOOK_DATA_FILE, 'w') as f:
-            json.dump(webhook_data, f, indent=2)
-        
-        print(f"💾 Saved parsed webhook data to: {WEBHOOK_DATA_FILE}")
-        return True
-    except Exception as e:
-        print(f"⚠️  Failed to save webhook data to file: {e}")
-        return False
 
 def extract_data_from_woocommerce_payload(data):
     """
@@ -348,6 +307,72 @@ def get_jenkins_crumb(jenkins_url, auth_header):
     except Exception:
         pass
     return None, None
+
+def execute_code_py(env_vars):
+    """
+    Execute code.py script with the provided environment variables.
+    This runs code.py directly without Jenkins.
+    
+    Args:
+        env_vars: dict of environment variables to set for code.py execution
+    
+    Returns:
+        tuple: (success: bool, message: str, process: subprocess.Popen or None)
+    """
+    if not CODE_PY_PATH or not os.path.exists(CODE_PY_PATH):
+        return False, f"code.py not found at: {CODE_PY_PATH}", None
+    
+    try:
+        # Prepare environment with existing env vars + new ones
+        env = os.environ.copy()
+        env.update(env_vars)
+        
+        # Execute code.py in a separate thread to avoid blocking webhook response
+        def run_code_py():
+            try:
+                print(f"\n🚀 Executing code.py with webhook data...")
+                print(f"   Script: {CODE_PY_PATH}")
+                
+                # Run code.py with the environment variables
+                process = subprocess.Popen(
+                    [sys.executable, CODE_PY_PATH],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                # Wait for completion (with timeout)
+                stdout, stderr = process.communicate(timeout=300)  # 5 minute timeout
+                
+                if process.returncode == 0:
+                    print(f"✅ code.py executed successfully")
+                    if stdout:
+                        print(f"   Output: {stdout[:500]}...")  # Show first 500 chars
+                else:
+                    print(f"❌ code.py execution failed with return code {process.returncode}")
+                    if stderr:
+                        print(f"   Error: {stderr[:500]}...")
+                    if stdout:
+                        print(f"   Output: {stdout[:500]}...")
+                
+                return process.returncode == 0, stdout, stderr
+            except subprocess.TimeoutExpired:
+                print(f"❌ code.py execution timed out after 5 minutes")
+                process.kill()
+                return False, "Execution timed out", None
+            except Exception as e:
+                print(f"❌ Error executing code.py: {str(e)}")
+                return False, str(e), None
+        
+        # Run in background thread so webhook can respond immediately
+        thread = threading.Thread(target=run_code_py, daemon=True)
+        thread.start()
+        
+        return True, "code.py execution started in background", None
+        
+    except Exception as e:
+        return False, f"Error: {str(e)}", None
 
 def trigger_jenkins_job(job_name, jenkins_url, username, api_token, params=None):
     """
@@ -608,7 +633,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             email_text = message_text
             parsed_data = parse_email_format_data(message_text)
         
-        # Save parsed data to file for scripts to read (always, even without Jenkins)
+        # Output parsed data as environment variables for script to use
         if parsed_data and any(parsed_data.values()):
             print(f"✅ Parsed data ready:")
             print(f"   First Name: {parsed_data.get('first_name')}")
@@ -616,31 +641,38 @@ class WebhookHandler(BaseHTTPRequestHandler):
             print(f"   Email: {parsed_data.get('email')}")
             print(f"   Course: {parsed_data.get('course')}")
             
-            # Save to file
-            if WEBHOOK_MODE == 'woocommerce':
-                save_webhook_data_to_file(
-                    parsed_data,
-                    email_text=email_text,
-                    webhook_subject=self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook'),
-                    webhook_to=parsed_data.get('email', '')
-                )
+            # Reconstruct message for WEBHOOK_MESSAGE
+            if email_text:
+                webhook_message = email_text
             else:
-                save_webhook_data_to_file(
-                    parsed_data,
-                    email_text=message_text,
-                    webhook_subject=data.get('subject', ''),
-                    webhook_to=data.get('to', '')
-                )
-        elif email_text:
-            # If we have email_text but parsing failed, still save it
-            partial_parsed = parse_email_format_data(email_text)
-            if partial_parsed:
-                save_webhook_data_to_file(
-                    partial_parsed,
-                    email_text=email_text,
-                    webhook_subject=data.get('subject', '') if WEBHOOK_MODE == 'custom' else self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook'),
-                    webhook_to=partial_parsed.get('email', '') or data.get('to', '')
-                )
+                webhook_message = reconstruct_email_format_message(parsed_data)
+            
+            # Set webhook subject and to
+            if WEBHOOK_MODE == 'woocommerce':
+                webhook_subject = self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook')
+                webhook_to = parsed_data.get('email', '')
+            else:
+                webhook_subject = data.get('subject', 'Webhook')
+                webhook_to = data.get('to', '') or parsed_data.get('email', '')
+            
+            # Output environment variables in shell-friendly format
+            print(f"\n{'='*60}")
+            print(f"📋 Environment Variables for Script:")
+            print(f"{'='*60}")
+            print(f"# Copy and run these commands to set environment variables:")
+            print(f"export WEBHOOK_MESSAGE={json.dumps(webhook_message)}")
+            print(f"export WEBHOOK_SUBJECT={json.dumps(webhook_subject)}")
+            print(f"export WEBHOOK_TO={json.dumps(webhook_to)}")
+            print(f"export FIRST_NAME={json.dumps(parsed_data.get('first_name', ''))}")
+            print(f"export LAST_NAME={json.dumps(parsed_data.get('last_name', ''))}")
+            print(f"export EMAIL={json.dumps(parsed_data.get('email', ''))}")
+            print(f"export COURSE={json.dumps(parsed_data.get('course', ''))}")
+            print(f"export COUNTRY={json.dumps(parsed_data.get('country', ''))}")
+            print(f"export DATE={json.dumps(parsed_data.get('date', ''))}")
+            print(f"export SOURCE={json.dumps(parsed_data.get('source', ''))}")
+            print(f"export PHONE={json.dumps(parsed_data.get('phone', ''))}")
+            print(f"export CDPID={json.dumps(parsed_data.get('cdpid', ''))}")
+            print(f"{'='*60}\n")
         
         # Trigger Jenkins job if configured
         jenkins_status = None
@@ -721,6 +753,53 @@ class WebhookHandler(BaseHTTPRequestHandler):
         else:
             print("⚠️  Jenkins not configured, skipping job trigger")
         
+        # Execute code.py directly if configured (without Jenkins)
+        code_py_status = None
+        if EXECUTE_CODE_PY and parsed_data and any(parsed_data.values()):
+            print(f"\n🚀 Executing code.py directly with webhook data...")
+            
+            # Prepare environment variables for code.py
+            code_py_env_vars = {}
+            
+            # Set webhook message, subject, and to
+            if email_text:
+                code_py_env_vars['WEBHOOK_MESSAGE'] = email_text
+            else:
+                code_py_env_vars['WEBHOOK_MESSAGE'] = reconstruct_email_format_message(parsed_data)
+            
+            if WEBHOOK_MODE == 'woocommerce':
+                code_py_env_vars['WEBHOOK_SUBJECT'] = self.headers.get('X-WC-Webhook-Event', 'WooCommerce Webhook')
+                code_py_env_vars['WEBHOOK_TO'] = parsed_data.get('email', '')
+            else:
+                code_py_env_vars['WEBHOOK_SUBJECT'] = data.get('subject', 'Webhook')
+                code_py_env_vars['WEBHOOK_TO'] = data.get('to', '') or parsed_data.get('email', '')
+            
+            # Set individual parsed fields
+            code_py_env_vars.update({
+                'FIRST_NAME': parsed_data.get('first_name', ''),
+                'LAST_NAME': parsed_data.get('last_name', ''),
+                'EMAIL': parsed_data.get('email', ''),
+                'COURSE': parsed_data.get('course', ''),
+                'COUNTRY': parsed_data.get('country', ''),
+                'DATE': parsed_data.get('date', ''),
+                'SOURCE': parsed_data.get('source', ''),
+                'PHONE': parsed_data.get('phone', ''),
+                'CDPID': parsed_data.get('cdpid', ''),
+            })
+            
+            success, message, process = execute_code_py(code_py_env_vars)
+            code_py_status = {
+                'executed': success,
+                'message': message
+            }
+            
+            if success:
+                print(f"✅ code.py execution initiated")
+            else:
+                print(f"❌ Failed to execute code.py: {message}")
+        elif EXECUTE_CODE_PY:
+            print("⚠️  code.py execution enabled but no parsed data available")
+        
         # Success response
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -729,6 +808,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         response_data = {'status': 'received'}
         if jenkins_status:
             response_data['jenkins'] = jenkins_status
+        if code_py_status:
+            response_data['code_py'] = code_py_status
         
         self.wfile.write(json.dumps(response_data).encode())
     
@@ -790,6 +871,16 @@ if __name__ == '__main__':
         print(f"  User: {JENKINS_USER}")
     else:
         print(f"Jenkins integration: ⚠️  Disabled (set JENKINS_URL, JENKINS_USER, JENKINS_API_TOKEN, JENKINS_JOB_NAME)")
+    
+    # Code.py execution status
+    if EXECUTE_CODE_PY:
+        print(f"\ncode.py execution: ✅ Enabled")
+        print(f"  Script path: {CODE_PY_PATH}")
+        print(f"  ℹ️  code.py will be executed automatically when webhook receives data")
+    else:
+        print(f"\ncode.py execution: ⚠️  Disabled")
+        print(f"  💡 To enable: Set EXECUTE_CODE_PY=true environment variable")
+        print(f"  💡 Optional: Set CODE_PY_PATH to specify code.py location (default: code.py)")
     
     server = HTTPServer(('0.0.0.0', PORT), WebhookHandler)
     server.serve_forever()
